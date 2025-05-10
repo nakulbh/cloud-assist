@@ -21,8 +21,19 @@
    [Input field where user enters their API key]
    ```
 
-3. **Component Selection**
-   After authentication, users see the component selection screen, but in a fully implemented version, they would likely go directly to the chat interface.
+try to add mock data for showing different use case of this cli
+
+3. **Direct to Chat Interface**
+   After successful authentication, users are taken directly to the chat interface, which is the primary interaction point of Cloud-Assist.
+
+   Example:
+   ```
+   Welcome to Cloud-Assist! I'm ready to help with your DevOps tasks.
+   
+   What would you like to accomplish today?
+   
+   [STATUS BAR] [CHAT] cloud-assist ready | ctx:0 | esc:back • ctrl+c:quit • 15:30:45
+   ```
 
 ## Main Interaction Flow
 

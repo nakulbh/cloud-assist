@@ -111,10 +111,10 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case authSuccessMsg:
 		m.authenticated = true
-		m.currentScreen = screenSelect
+		m.currentScreen = screenChat // Go directly to chat interface in production
 		// Update status bar mode and status
-		m.statusBar.SetMode("select")
-		m.statusBar.SetStatus("authenticated")
+		m.statusBar.SetMode("chat")
+		m.statusBar.SetStatus("cloud-assist ready")
 		return m, nil
 
 	case showScreenMsg:
@@ -146,7 +146,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if err != nil {
 				fmt.Println("Error saving API key:", err)
 			}
-			// Transition to select screen
+			// Transition to chat screen directly
 			return m, func() tea.Msg { return authSuccessMsg{} }
 		}
 
@@ -236,8 +236,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// User confirmed exit
 				return m, tea.Quit
 			} else {
-				// Return to select screen if canceled
-				return m, func() tea.Msg { return showScreenMsg{screen: screenSelect} }
+				// Return to chat screen if canceled
+				return m, func() tea.Msg { return showScreenMsg{screen: screenChat} }
 			}
 		}
 
@@ -246,8 +246,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Handle escape key globally
 	if msg, ok := msg.(tea.KeyMsg); ok && msg.String() == "esc" && m.currentScreen != screenLogin {
-		// Go back to select screen
-		return m, func() tea.Msg { return showScreenMsg{screen: screenSelect} }
+		if m.currentScreen != screenChat {
+			// Go back to chat screen from any other screen (except login)
+			return m, func() tea.Msg { return showScreenMsg{screen: screenChat} }
+		}
+		// In chat screen, ESC does nothing special
 	}
 
 	cmds = append(cmds, cmd)

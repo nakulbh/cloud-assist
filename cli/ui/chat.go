@@ -1,198 +1,416 @@
 package ui
 
 import (
-	"fmt"
+	"cloud-assist/internal/mock"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-// ChatModel represents a chat interface
-type ChatModel struct {
-	viewport     viewport.Model
-	messages     []Message
-	input        MultilineModel
-	spinner      SpinnerModel
-	width        int
-	height       int
-	ready        bool
-	isProcessing bool
+type messageType int
+
+const (
+	userMessage messageType = iota
+	agentMessage
+	commandSuggestion
+	commandOutput
+	errorMessage
+)
+
+type message struct {
+	content string
+	msgType messageType
 }
 
-// Message represents a chat message
-type Message struct {
-	Content   string
-	IsUser    bool
-	Timestamp time.Time
+// ChatModel represents the chat interface
+type ChatModel struct {
+	messages       []message
+	viewport       viewport.Model
+	input          MultilineModel
+	width          int
+	height         int
+	showInput      bool
+	suggestionMode bool
+	currentCommand string
+	agentService   *mock.AgentService
 }
 
 // NewChatModel creates a new chat model
 func NewChatModel(width, height int) ChatModel {
-	input := NewMultiline("", "Type your message here...", width, 5)
-	spinner := NewSpinner("Processing...").WithColor("205")
-	spinner.Stop()
+	input := NewMultiline("", "What would you like to do?", width-4, 5)
+	vp := viewport.New(width, height-10) // Leave space for input
+	vp.Style = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).Padding(1).Border(lipgloss.NormalBorder(), false, true)
 
-	// Initialize the viewport with default dimensions
-	vp := viewport.New(width, height-10)
-	vp.SetContent("")
+	// Initialize the agent service
+	agentService := mock.NewAgentService()
 
-	return ChatModel{
-		viewport:     vp,
-		messages:     []Message{},
-		input:        input,
-		spinner:      spinner,
-		width:        width,
-		height:       height,
-		ready:        true, // Set ready to true since viewport is initialized
-		isProcessing: false,
+	// Process the first message from agent
+	initialMessages := agentService.ProcessUserMessage("help")
+
+	// Create the chat model
+	model := ChatModel{
+		messages:       []message{},
+		viewport:       vp,
+		input:          input,
+		width:          width,
+		height:         height,
+		showInput:      true,
+		suggestionMode: false,
+		agentService:   agentService,
 	}
+
+	// Add initial messages from agent
+	for _, msg := range initialMessages {
+		var msgType messageType
+		switch msg.Type {
+		case mock.TypeAgent:
+			msgType = agentMessage
+		case mock.TypeCommand:
+			msgType = commandSuggestion
+			model.currentCommand = msg.Content
+			model.suggestionMode = true
+		case mock.TypeCommandOutput:
+			msgType = commandOutput
+		case mock.TypeError:
+			msgType = errorMessage
+		}
+
+		model.messages = append(model.messages, message{
+			content: msg.Content,
+			msgType: msgType,
+		})
+	}
+
+	model.updateViewport()
+	return model
 }
 
 // Init initializes the chat model
 func (m ChatModel) Init() tea.Cmd {
-	return tea.Batch(
-		m.input.Init(),
-		m.spinner.Init(),
-	)
+	return nil
 }
 
 // Update handles updates to the chat model
 func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
-		cmd  tea.Cmd
 		cmds []tea.Cmd
 	)
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "ctrl+c", "esc":
+		case "ctrl+c":
+			// Handle exit with Ctrl+C
 			return m, tea.Quit
-		case "enter":
-			if !m.isProcessing && msg.Type == tea.KeyEnter && !msg.Alt {
-				// Submit message
-				content := strings.TrimSpace(m.input.Value())
-				if content != "" {
-					m.messages = append(m.messages, Message{
-						Content:   content,
-						IsUser:    true,
-						Timestamp: time.Now(),
-					})
-					m.input.SetValue("")
-					m.isProcessing = true
-					m.spinner.Start()
 
-					// Simulate AI response after a delay
-					return m, tea.Batch(
-						tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
-							return aiResponseMsg{
-								content: "This is a simulated AI response to: " + content,
-							}
-						}),
-					)
-				}
+		case "enter":
+			if m.suggestionMode {
+				// Handle command approval
+				return m.handleCommandApproval("y")
+			} else {
+				// Handle user input
+				return m.handleUserInput()
+			}
+
+		case "y":
+			if m.suggestionMode {
+				// Execute suggested command
+				return m.handleCommandApproval("y")
+			}
+
+		case "n":
+			if m.suggestionMode {
+				// Skip suggested command
+				return m.handleCommandApproval("n")
+			}
+
+		case "e":
+			if m.suggestionMode {
+				// Explain suggested command
+				return m.handleCommandApproval("e")
+			}
+
+		case "q":
+			if m.suggestionMode {
+				// Quit command suggestion mode
+				m.suggestionMode = false
+				m.showInput = true
+				m.messages = append(m.messages, message{
+					content: "Command skipped.",
+					msgType: agentMessage,
+				})
+				m.updateViewport()
+				return m, nil
 			}
 		}
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-
-		if !m.ready {
-			// Initialize viewport
-			m.viewport = viewport.New(m.width, m.height-10) // Leave room for input
-			m.viewport.SetContent(m.renderMessages())
-			m.ready = true
-		} else {
-			m.viewport.Width = m.width
-			m.viewport.Height = m.height - 10
-		}
-
-		// Also update width of input
-		m.input.width = m.width
-
-	case aiResponseMsg:
-		m.isProcessing = false
-		m.spinner.Stop()
-		m.messages = append(m.messages, Message{
-			Content:   msg.content,
-			IsUser:    false,
-			Timestamp: time.Now(),
-		})
-		m.viewport.SetContent(m.renderMessages())
-		cmds = append(cmds, viewport.Sync(m.viewport))
 	}
 
 	// Handle viewport updates
-	if m.ready {
-		m.viewport.SetContent(m.renderMessages())
-		m.viewport, cmd = m.viewport.Update(msg)
-		cmds = append(cmds, cmd)
-	}
+	newViewport, vpCmd := m.viewport.Update(msg)
+	m.viewport = newViewport
+	cmds = append(cmds, vpCmd)
 
-	// Handle input updates
-	if !m.isProcessing {
-		m.input, cmd = m.input.Update(msg)
-		cmds = append(cmds, cmd)
+	// Handle input updates if input is shown
+	if m.showInput {
+		newInput, inputCmd := m.input.Update(msg)
+		m.input = newInput
+		cmds = append(cmds, inputCmd)
 	}
-
-	// Handle spinner updates
-	m.spinner, cmd = m.spinner.Update(msg)
-	cmds = append(cmds, cmd)
 
 	return m, tea.Batch(cmds...)
 }
 
-// View renders the chat model
-func (m ChatModel) View() string {
-	if !m.ready {
-		return "Initializing..."
-	}
-	if m.isProcessing {
-		return m.spinner.View()
+// handleUserInput processes user input and returns agent responses
+func (m ChatModel) handleUserInput() (tea.Model, tea.Cmd) {
+	userInput := m.input.Value()
+	if strings.TrimSpace(userInput) == "" {
+		return m, nil
 	}
 
-	viewportView := m.viewport.View()
-	inputView := m.input.View()
-	spinnerView := ""
-	if m.isProcessing {
-		spinnerView = "\n" + m.spinner.View()
-	}
+	// Add user message to chat
+	m.messages = append(m.messages, message{
+		content: userInput,
+		msgType: userMessage,
+	})
 
-	// Combine the views
-	return fmt.Sprintf("%s\n\n%s%s", viewportView, inputView, spinnerView)
-}
+	// Reset input
+	m.input = NewMultiline("", "What would you like to do?", m.width-4, 5)
 
-// renderMessages renders all messages
-func (m ChatModel) renderMessages() string {
-	var sb strings.Builder
+	// Process the message with the agent service
+	agentResponses := m.agentService.ProcessUserMessage(userInput)
 
-	userStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true) // Blue
-	aiStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)   // Green
-	contentStyle := lipgloss.NewStyle().PaddingLeft(2)
-	timeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
-
-	for _, msg := range m.messages {
-		// Format timestamp
-		timestamp := msg.Timestamp.Format("15:04:05")
-
-		// Add sender and timestamp
-		if msg.IsUser {
-			sb.WriteString(userStyle.Render("You") + " " + timeStyle.Render(timestamp) + "\n")
-		} else {
-			sb.WriteString(aiStyle.Render("AI") + " " + timeStyle.Render(timestamp) + "\n")
+	// Add agent responses to chat
+	for _, resp := range agentResponses {
+		var msgType messageType
+		switch resp.Type {
+		case mock.TypeAgent:
+			msgType = agentMessage
+		case mock.TypeCommand:
+			msgType = commandSuggestion
+			m.currentCommand = resp.Content
+			m.suggestionMode = true
+			m.showInput = false
+		case mock.TypeCommandOutput:
+			msgType = commandOutput
+		case mock.TypeError:
+			msgType = errorMessage
 		}
 
-		// Add content
-		sb.WriteString(contentStyle.Render(msg.Content) + "\n\n")
+		m.messages = append(m.messages, message{
+			content: resp.Content,
+			msgType: msgType,
+		})
 	}
 
-	return sb.String()
+	m.updateViewport()
+	return m, nil
 }
 
-// aiResponseMsg is a message containing an AI response
-type aiResponseMsg struct {
-	content string
+// handleCommandApproval processes command approval responses
+func (m ChatModel) handleCommandApproval(response string) (tea.Model, tea.Cmd) {
+	// Add user response to chat
+	var responseText string
+	switch response {
+	case "y":
+		responseText = "y"
+	case "n":
+		responseText = "n"
+	case "e":
+		responseText = "e"
+	}
+
+	m.messages = append(m.messages, message{
+		content: responseText,
+		msgType: userMessage,
+	})
+
+	// Process the response with the agent service
+	var agentResponses []mock.AgentMessage
+	if response == "y" {
+		agentResponses = m.agentService.ExecuteSuggestedCommand()
+	} else if response == "e" {
+		agentResponses = m.agentService.ProcessUserMessage("e")
+		// Keep suggestion mode active after explanation
+		m.suggestionMode = true
+		m.showInput = false
+	} else {
+		// For "n" response, just skip this command
+		m.suggestionMode = false
+		m.showInput = true
+		m.messages = append(m.messages, message{
+			content: "Command skipped. What would you like to do instead?",
+			msgType: agentMessage,
+		})
+		m.updateViewport()
+		return m, nil
+	}
+
+	// Add agent responses to chat
+	for _, resp := range agentResponses {
+		var msgType messageType
+		switch resp.Type {
+		case mock.TypeAgent:
+			msgType = agentMessage
+		case mock.TypeCommand:
+			msgType = commandSuggestion
+			m.currentCommand = resp.Content
+			m.suggestionMode = true
+			m.showInput = false
+		case mock.TypeCommandOutput:
+			msgType = commandOutput
+		case mock.TypeError:
+			msgType = errorMessage
+		}
+
+		m.messages = append(m.messages, message{
+			content: resp.Content,
+			msgType: msgType,
+		})
+	}
+
+	m.updateViewport()
+	return m, nil
+}
+
+// updateViewport updates the viewport content
+func (m *ChatModel) updateViewport() {
+	var viewportContent strings.Builder
+
+	for i, msg := range m.messages {
+		// Add a newline between messages
+		if i > 0 {
+			viewportContent.WriteString("\n\n")
+		}
+
+		switch msg.msgType {
+		case userMessage:
+			viewportContent.WriteString(lipgloss.NewStyle().
+				Foreground(lipgloss.Color("5")).
+				Render("You: "))
+			viewportContent.WriteString(msg.content)
+
+		case agentMessage:
+			viewportContent.WriteString(lipgloss.NewStyle().
+				Foreground(lipgloss.Color("2")).
+				Bold(true).
+				Render("Cloud-Assist: "))
+			viewportContent.WriteString(msg.content)
+
+		case commandSuggestion:
+			// Center the command suggestion with box styling
+			viewportContent.WriteString(lipgloss.NewStyle().
+				Foreground(lipgloss.Color("3")).
+				Bold(true).
+				Align(lipgloss.Center).
+				Width(m.width - 10).
+				Render("Suggested command:"))
+
+			viewportContent.WriteString("\n")
+
+			// Command box with improved styling
+			viewportContent.WriteString(lipgloss.NewStyle().
+				Align(lipgloss.Center).
+				Width(m.width - 10).
+				Render(
+					lipgloss.NewStyle().
+						Background(lipgloss.Color("8")).
+						Foreground(lipgloss.Color("15")).
+						Padding(1, 2).
+						Border(lipgloss.RoundedBorder()).
+						BorderForeground(lipgloss.Color("12")).
+						Width(m.width / 2).
+						Align(lipgloss.Center).
+						Render(msg.content),
+				))
+
+			viewportContent.WriteString("\n\n")
+
+			// Center the options with improved styling
+			viewportContent.WriteString(lipgloss.NewStyle().
+				Foreground(lipgloss.Color("6")).
+				Align(lipgloss.Center).
+				Width(m.width - 10).
+				Render("[y] Execute  [n] Skip  [e] Explain  [q] Quit"))
+
+		case commandOutput:
+			// Add header for output with box styling
+			viewportContent.WriteString(lipgloss.NewStyle().
+				Foreground(lipgloss.Color("8")).
+				Bold(true).
+				Render("Output:"))
+
+			viewportContent.WriteString("\n")
+
+			// Output box with improved styling
+			viewportContent.WriteString(lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("8")).
+				Padding(0, 1).
+				Width(m.width - 10).
+				Render(
+					lipgloss.NewStyle().
+						Foreground(lipgloss.Color("7")).
+						Render(msg.content),
+				))
+
+		case errorMessage:
+			viewportContent.WriteString(lipgloss.NewStyle().
+				Foreground(lipgloss.Color("1")).
+				Bold(true).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("1")).
+				Padding(0, 1).
+				Width(m.width - 10).
+				Render("Error: " + msg.content))
+		}
+	}
+
+	m.viewport.SetContent(viewportContent.String())
+	m.viewport.GotoBottom()
+}
+
+// View renders the chat model
+func (m ChatModel) View() string {
+	var view strings.Builder
+
+	// Create a centered container for the entire view
+	mainStyle := lipgloss.NewStyle().
+		Width(m.width).
+		Align(lipgloss.Center)
+
+	// Chat history with improved styling
+	view.WriteString(mainStyle.Render(m.viewport.View()) + "\n\n")
+
+	// Input header with consistent styling
+	inputHeader := "What would you like to help with?"
+	if m.suggestionMode {
+		inputHeader = "Command suggestion active. Press y to execute, n to skip, e to explain, or q to quit."
+	}
+
+	headerStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("12")).
+		Bold(true).
+		Width(m.width - 10).
+		Align(lipgloss.Center)
+
+	view.WriteString(mainStyle.Render(headerStyle.Render(inputHeader)))
+	view.WriteString("\n")
+
+	// Render input with improved styling
+	if m.showInput {
+		// Create a consistent input box style
+		inputBoxStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("12")).
+			Padding(1, 2).
+			Width(m.width - 20)
+
+		// Wrap the input in the styled box
+		inputContent := inputBoxStyle.Render(m.input.View())
+		view.WriteString(mainStyle.Render(inputContent))
+	}
+
+	return view.String()
 }
