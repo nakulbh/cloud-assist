@@ -1,176 +1,82 @@
-# Cloud-Assist: DevOps Terminal Agent
+# Cloud-Assist: AI DevOps Terminal Agent
 
 ![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-A powerful terminal-based DevOps agent that helps automate common cloud and infrastructure tasks through an intuitive command-line interface. Cloud-Assist uses AI to understand intent, suggest commands, and learn from execution patterns to streamline complex DevOps workflows.
+An intelligent terminal-based DevOps assistant powered by AI. Simply describe what you want to accomplish in plain language, and Cloud-Assist will suggest the right commands, execute them with your approval, and help you complete complex infrastructure tasks.
 
-![Cloud-Assist Demo](https://example.com/cloud-assist-demo.gif)
+## 🎥 Demo
 
-## Features
+![Cloud-Assist CLI in Action](media/ezgif-14b23103c622c7.gif)
 
-- **Conversational Interface**: Describe what you want to accomplish in plain language
-- **Command Suggestions**: Receive contextually appropriate shell commands
-- **Command Approval**: Review and approve commands before execution
-- **Output Analysis**: AI analyzes command output to determine next steps
-- **Persistent Context**: Maintains understanding of your infrastructure throughout a session
-- **Security-Focused**: All commands require explicit approval by default
+*Watch Cloud-Assist in action: Interactive terminal interface with real-time AI assistance for DevOps tasks.*
 
-## Use Cases
+## ✨ What It Does
 
-- Setting up and configuring cloud resources
-- Troubleshooting infrastructure issues
-- Deploying applications to various environments
-- Managing Kubernetes clusters
-- Configuring networking and security
-- Automating repetitive DevOps tasks
+**Talk to your terminal like a DevOps expert**
+- Describe tasks in natural language: *"Set up monitoring for my web service"*
+- Get contextually appropriate command suggestions
+- Review and approve each command before execution
+- AI analyzes output and suggests next steps
+- Maintains context throughout your session
 
-## Installation
+**Perfect for:**
+- Cloud infrastructure setup and management
+- Kubernetes cluster operations
+- Application deployment and troubleshooting
+- Docker container management
+- System monitoring and debugging
 
-### Prerequisites
+## 🏗️ Architecture
 
-- Go 1.24 or higher
-- Access to an AI model API (OpenAI, Anthropic, etc.)
+Cloud-Assist consists of two main components:
 
-### From Source
+**🤖 AI Agent** (Python + LangGraph)
+- Powered by LangGraph for complex reasoning workflows
+- Supports multiple AI models (OpenAI, Anthropic, etc.)
+- Maintains conversation context and command history
+- Analyzes command output and suggests next steps
 
-```bash
-git clone https://github.com/yourusername/cloud-assist.git
-cd cloud-assist/cli
-go build -o cloud-assist cmd/main.go
-```
-
-### Using Go Install
-
-```bash
-go install github.com/yourusername/cloud-assist/cli/cmd@latest
-```
-
-## Getting Started
-
-### First Run
-
-1. Start a new session:
-
-```bash
-cloud-assist
-```
-
-2. Enter your API key when prompted (this will be securely stored for future sessions)
-
-### Basic Usage
-
-1. Start a new session with a task description:
-
-```bash
-cloud-assist "setup a monitoring stack for my web service"
-```
-
-2. Review and approve suggested commands
-3. See results and next suggestions
-4. Continue until your task is complete
-
-## Command Approval
-
-Cloud-Assist never executes commands without your approval. For each suggested command, you have the following options:
-
-- **Yes (y)**: Execute the command
-- **No (n)**: Skip this command and try a different approach
-- **Explain (e)**: Request more detailed explanation before deciding
-- **Quit (q)**: Exit the current session
-
-## Configuration
-
-Cloud-Assist can be configured through environment variables or a config file at `~/.config/cloud-assist/config.json`.
-
-Key configuration options:
-- `CLOUD_ASSIST_MODEL`: AI model to use
-- `CLOUD_ASSIST_APPROVAL_MODE`: Default approval behavior (suggest, auto, full-auto)
-- `CLOUD_ASSIST_HISTORY_FILE`: Where to store command history
-
-## Example Workflows
-
-### Setting Up Kubernetes Monitoring
+**💻 Terminal CLI** (Go + Bubble Tea)
+- Beautiful terminal user interface
+- Secure command approval workflow
+- Real-time communication with AI agent
+- Session management and history
 
 ```
-User: "I need to set up monitoring for my Kubernetes cluster"
-
-Cloud-Assist: "I'll help you set up monitoring for your Kubernetes cluster. First, let's check if you have Helm installed:
-
-Suggested command:
-helm version
-
-[y] Execute  [n] Skip  [e] Explain  [q] Quit"
-
-User: y
-
-[Command output shows Helm is installed]
-
-Cloud-Assist: "Great! Now let's add the Prometheus community Helm chart repository..."
+┌─────────────────┐    WebSocket    ┌──────────────────┐
+│   Terminal CLI  │ ◄──────────────► │   AI Agent       │
+│   (Go/BubbleTea)│                  │   (Python/       │
+│                 │                  │    LangGraph)    │
+└─────────────────┘                  └──────────────────┘
+         │                                     │
+         ▼                                     ▼
+   User Approval                        AI Model APIs
+   Command Execution                    (OpenAI, etc.)
 ```
 
-### Troubleshooting a Web Service
+## 💡 Example Workflow
 
 ```
-User: "My nginx web server is returning 503 errors. Help me troubleshoot."
+👤 You: "My nginx server is returning 503 errors"
 
-Cloud-Assist: "I'll help you troubleshoot the 503 errors from your nginx server. First, let's check if nginx is running:
+🤖 Cloud-Assist: "Let me help troubleshoot your nginx 503 errors. 
+                  First, let's check if nginx is running:"
 
-Suggested command:
-systemctl status nginx
+   💻 Suggested: systemctl status nginx
+   
+   ✅ [Execute] ❌ [Skip] ❓ [Explain] 🚪 [Quit]
 
-[y] Execute  [n] Skip  [e] Explain  [q] Quit"
+👤 You: ✅
+
+🤖 Cloud-Assist: "Nginx is running but upstream servers are down. 
+                  Let's check your backend services..."
 ```
 
-## Architecture
+## 🤝 Contributing
 
-Cloud-Assist is built using Go with the following components:
+This project is under active development. Contributions, feedback, and suggestions are welcome!
 
-- **UI Layer**: Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lip Gloss](https://github.com/charmbracelet/lipgloss)
-- **API Integration**: Secure communication with AI model providers
-- **Command Execution**: Safe execution and output capture for shell commands
-- **Context Management**: Tracking session state and command history
-- **Model Context Protocol (MCP)**: Standardized communication with AI tools
+## 📄 License
 
-## Development
-
-### Project Structure
-
-```
-cli/
-  ├── cmd/           # Application entrypoint
-  ├── internal/      # Private application logic
-  └── ui/            # User interface components
-documents/          # Documentation and specifications
-```
-
-### Building and Testing
-
-```bash
-cd cli
-go test ./...
-go build -o cloud-assist cmd/main.go
-```
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgments
-
-- [Bubble Tea](https://github.com/charmbracelet/bubbletea) for the TUI framework
-- [Lip Gloss](https://github.com/charmbracelet/lipgloss) for terminal styling
-
----
-
-Built with ❤️ for DevOps engineers who value both automation and control.
+MIT License - Built with ❤️ for DevOps engineers who value both automation and control.
