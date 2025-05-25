@@ -44,6 +44,25 @@ func (m MultilineModel) Init() tea.Cmd {
 // Update handles updates to the multiline text editor component
 func (m MultilineModel) Update(msg tea.Msg) (MultilineModel, tea.Cmd) {
 	var cmd tea.Cmd
+
+	// Check for special keys before passing to textarea
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch keyMsg.String() {
+		case "shift+enter":
+			// Allow Shift+Enter to add new lines - convert to regular enter for textarea
+			enterMsg := tea.KeyMsg{
+				Type:  tea.KeyEnter,
+				Runes: []rune{'\n'},
+			}
+			m.textarea, cmd = m.textarea.Update(enterMsg)
+			return m, cmd
+		case "enter", "ctrl+enter":
+			// Don't pass Enter or Ctrl+Enter to textarea, let parent handle them
+			// But still update textarea for other keys
+			return m, nil
+		}
+	}
+
 	m.textarea, cmd = m.textarea.Update(msg)
 	return m, cmd
 }
@@ -61,6 +80,12 @@ func (m MultilineModel) Value() string {
 // SetValue sets the value of the multiline text editor
 func (m MultilineModel) SetValue(value string) {
 	m.textarea.SetValue(value)
+}
+
+// SetWidth sets the width of the multiline text editor
+func (m *MultilineModel) SetWidth(width int) {
+	m.width = width
+	m.textarea.SetWidth(width)
 }
 
 // Focus focuses the multiline text editor

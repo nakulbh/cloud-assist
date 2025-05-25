@@ -1,7 +1,8 @@
 package ui
 
 import (
-	"cloud-assist/internal/mock"
+	"cloud-assist/client"
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -17,39 +18,66 @@ const (
 	commandSuggestion
 	commandOutput
 	errorMessage
+	retryRequest
 )
 
 type message struct {
-	content string
-	msgType messageType
+	content     string
+	msgType     messageType
+	command     []string
+	explanation string
+	retryCount  int
+}
+
+// Custom messages for Bubble Tea updates
+type AgentConnectedMsg struct{}
+type AgentDisconnectedMsg struct{}
+type AgentMessageMsg struct {
+	Content string
+}
+type CommandApprovalMsg struct {
+	Command     []string
+	Explanation string
+}
+type CommandOutputMsg struct {
+	Output string
+}
+type RetryRequestMsg struct {
+	Content    string
+	RetryCount int
+}
+type AgentErrorMsg struct {
+	Error string
 }
 
 // ChatModel represents the chat interface
 type ChatModel struct {
-	messages       []message
-	viewport       viewport.Model
-	input          MultilineModel
-	width          int
-	height         int
-	showInput      bool
-	suggestionMode bool
-	currentCommand string
-	agentService   *mock.AgentService
+	messages            []message
+	viewport            viewport.Model
+	input               MultilineModel
+	width               int
+	height              int
+	showInput           bool
+	suggestionMode      bool
+	retryMode           bool
+	currentCommand      []string
+	currentExplanation  string
+	currentRetryContent string
+	currentRetryCount   int
+	agentClient         *client.AgentClient
+	connected           bool
+	messageChannel      chan tea.Msg
 }
 
 // NewChatModel creates a new chat model
 func NewChatModel(width, height int) ChatModel {
 	input := NewMultiline("", "What would you like to do?", width-4, 5)
-	vp := viewport.New(width, height-10) // Leave space for input
+	vp := viewport.New(width, height-10)
 	vp.Style = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).Padding(1).Border(lipgloss.NormalBorder(), false, true)
 
-	// Initialize the agent service
-	agentService := mock.NewAgentService()
+	agentClient := client.NewAgentClient("ws://localhost:8765")
+	messageChannel := make(chan tea.Msg, 100)
 
-	// Process the first message from agent
-	initialMessages := agentService.ProcessUserMessage("help")
-
-	// Create the chat model
 	model := ChatModel{
 		messages:       []message{},
 		viewport:       vp,
@@ -57,360 +85,437 @@ func NewChatModel(width, height int) ChatModel {
 		width:          width,
 		height:         height,
 		showInput:      true,
-		suggestionMode: false,
-		agentService:   agentService,
+		agentClient:    agentClient,
+		messageChannel: messageChannel,
 	}
 
-	// Add initial messages from agent
-	for _, msg := range initialMessages {
-		var msgType messageType
-		switch msg.Type {
-		case mock.TypeAgent:
-			msgType = agentMessage
-		case mock.TypeCommand:
-			msgType = commandSuggestion
-			model.currentCommand = msg.Content
-			model.suggestionMode = true
-		case mock.TypeCommandOutput:
-			msgType = commandOutput
-		case mock.TypeError:
-			msgType = errorMessage
-		}
-
-		model.messages = append(model.messages, message{
-			content: msg.Content,
-			msgType: msgType,
-		})
-	}
-
-	model.updateViewport()
+	model.setupWebSocketHandlers()
 	return model
+}
+
+// setupWebSocketHandlers configures the WebSocket client event handlers
+func (m *ChatModel) setupWebSocketHandlers() {
+	m.agentClient.SetMessageHandler(func(content string) {
+		select {
+		case m.messageChannel <- AgentMessageMsg{Content: content}:
+		default:
+		}
+	})
+
+	m.agentClient.SetCommandApprovalHandler(func(command []string, explanation string) {
+		select {
+		case m.messageChannel <- CommandApprovalMsg{Command: command, Explanation: explanation}:
+		default:
+		}
+	})
+
+	m.agentClient.SetCommandOutputHandler(func(output string) {
+		select {
+		case m.messageChannel <- CommandOutputMsg{Output: output}:
+		default:
+		}
+	})
+
+	m.agentClient.SetRetryRequestHandler(func(content string, retryCount int) {
+		select {
+		case m.messageChannel <- RetryRequestMsg{Content: content, RetryCount: retryCount}:
+		default:
+		}
+	})
+
+	m.agentClient.SetErrorHandler(func(error string) {
+		select {
+		case m.messageChannel <- AgentErrorMsg{Error: error}:
+		default:
+		}
+	})
+
+	m.agentClient.SetConnectionLostHandler(func() {
+		select {
+		case m.messageChannel <- AgentDisconnectedMsg{}:
+		default:
+		}
+	})
+}
+
+// ConnectToAgent attempts to connect to the agent WebSocket server
+func (m *ChatModel) ConnectToAgent() tea.Cmd {
+	return func() tea.Msg {
+		if err := m.agentClient.Connect(); err != nil {
+			return AgentErrorMsg{Error: fmt.Sprintf("Failed to connect to agent: %v", err)}
+		}
+		return AgentConnectedMsg{}
+	}
+}
+
+// DisconnectFromAgent disconnects from the agent WebSocket server
+func (m *ChatModel) DisconnectFromAgent() {
+	if m.agentClient != nil {
+		m.agentClient.Disconnect()
+	}
+	m.connected = false
 }
 
 // Init initializes the chat model
 func (m ChatModel) Init() tea.Cmd {
-	return nil
+	return tea.Batch(
+		m.input.Init(),
+		m.ConnectToAgent(),
+		m.listenForWebSocketMessages(),
+	)
 }
 
-// Update handles updates to the chat model
+// listenForWebSocketMessages creates a command that listens for WebSocket messages
+func (m ChatModel) listenForWebSocketMessages() tea.Cmd {
+	return func() tea.Msg {
+		return <-m.messageChannel
+	}
+}
+
+// Update handles chat updates
 func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var (
-		cmds []tea.Cmd
-	)
+	var cmds []tea.Cmd
+	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.viewport.Width = msg.Width
+		m.viewport.Height = msg.Height - 10
+		m.input.SetWidth(msg.Width - 4)
+
+	case AgentConnectedMsg:
+		m.connected = true
+		m.addMessage("How can I help you today?", agentMessage)
+		cmds = append(cmds, m.listenForWebSocketMessages())
+
+	case AgentDisconnectedMsg:
+		m.connected = false
+		m.addMessage("Disconnected from agent", errorMessage)
+		cmds = append(cmds, m.listenForWebSocketMessages())
+
+	case AgentMessageMsg:
+		m.addMessage(msg.Content, agentMessage)
+		cmds = append(cmds, m.listenForWebSocketMessages())
+
+	case CommandApprovalMsg:
+		m.suggestionMode = true
+		m.currentCommand = msg.Command
+		m.currentExplanation = msg.Explanation
+		m.addCommandSuggestion(msg.Command, msg.Explanation)
+		cmds = append(cmds, m.listenForWebSocketMessages())
+
+	case CommandOutputMsg:
+		m.addMessage(msg.Output, commandOutput)
+		cmds = append(cmds, m.listenForWebSocketMessages())
+
+	case RetryRequestMsg:
+		m.retryMode = true
+		m.currentRetryContent = msg.Content
+		m.currentRetryCount = msg.RetryCount
+		m.addRetryRequest(msg.Content, msg.RetryCount)
+		cmds = append(cmds, m.listenForWebSocketMessages())
+
+	case AgentErrorMsg:
+		m.addMessage(fmt.Sprintf("Error: %s", msg.Error), errorMessage)
+		cmds = append(cmds, m.listenForWebSocketMessages())
+
 	case tea.KeyMsg:
+		// Handle global keys first
 		switch msg.String() {
 		case "ctrl+c":
-			// Handle exit with Ctrl+C
-			return m, tea.Quit
+			if m.suggestionMode || m.retryMode {
+				m.suggestionMode = false
+				m.retryMode = false
+				m.showInput = true
+				m.input.Focus()
+
+				if m.suggestionMode && m.connected {
+					m.agentClient.SendCommandApproval(false)
+				}
+				if m.retryMode && m.connected {
+					m.agentClient.SendRetryResponse(false)
+				}
+				return m, nil
+			} else {
+				// Exit the application
+				return m, tea.Quit
+			}
 
 		case "enter":
-			if m.suggestionMode {
-				// Handle command approval
-				return m.handleCommandApproval("y")
-			} else {
-				// Handle user input
-				return m.handleUserInput()
+			if m.showInput && !m.suggestionMode && !m.retryMode {
+				userInput := strings.TrimSpace(m.input.Value())
+				if userInput != "" && m.connected {
+					m.addMessage(userInput, userMessage)
+					m.input.SetValue("")
+
+					err := m.agentClient.SendMessage(userInput)
+					if err != nil {
+						m.addMessage(fmt.Sprintf("Error sending message: %v", err), errorMessage)
+					}
+				}
+				return m, tea.Batch(cmds...)
 			}
 
-		case "y":
-			if m.suggestionMode {
-				// Execute suggested command
-				return m.handleCommandApproval("y")
+		case "ctrl+enter":
+			if m.showInput && !m.suggestionMode && !m.retryMode {
+				userInput := strings.TrimSpace(m.input.Value())
+				if userInput != "" && m.connected {
+					m.addMessage(userInput, userMessage)
+					m.input.SetValue("")
+
+					err := m.agentClient.SendMessage(userInput)
+					if err != nil {
+						m.addMessage(fmt.Sprintf("Error sending message: %v", err), errorMessage)
+					}
+				}
+				return m, tea.Batch(cmds...)
 			}
 
-		case "n":
-			if m.suggestionMode {
-				// Skip suggested command
-				return m.handleCommandApproval("n")
-			}
-
-		case "e":
-			if m.suggestionMode {
-				// Explain suggested command
-				return m.handleCommandApproval("e")
-			}
-
-		case "q":
-			if m.suggestionMode {
-				// Quit command suggestion mode
+		case "y", "Y":
+			if m.suggestionMode && m.connected {
 				m.suggestionMode = false
 				m.showInput = true
-				m.messages = append(m.messages, message{
-					content: "Command skipped.",
-					msgType: agentMessage,
-				})
-				m.updateViewport()
-				return m, nil
+				m.input.Focus()
+				m.addMessage("Command approved and executing...", userMessage)
+
+				err := m.agentClient.SendCommandApproval(true)
+				if err != nil {
+					m.addMessage(fmt.Sprintf("Error sending approval: %v", err), errorMessage)
+				}
+			} else if m.retryMode && m.connected {
+				m.retryMode = false
+				m.showInput = true
+				m.input.Focus()
+				m.addMessage("Retrying with a different approach...", userMessage)
+
+				err := m.agentClient.SendRetryResponse(true)
+				if err != nil {
+					m.addMessage(fmt.Sprintf("Error sending retry response: %v", err), errorMessage)
+				}
 			}
+
+		case "n", "N":
+			if m.suggestionMode && m.connected {
+				m.suggestionMode = false
+				m.showInput = true
+				m.input.Focus()
+				m.addMessage("Command rejected", userMessage)
+
+				err := m.agentClient.SendCommandApproval(false)
+				if err != nil {
+					m.addMessage(fmt.Sprintf("Error sending rejection: %v", err), errorMessage)
+				}
+			} else if m.retryMode && m.connected {
+				m.retryMode = false
+				m.showInput = true
+				m.input.Focus()
+				m.addMessage("Retry cancelled", userMessage)
+
+				err := m.agentClient.SendRetryResponse(false)
+				if err != nil {
+					m.addMessage(fmt.Sprintf("Error sending retry response: %v", err), errorMessage)
+				}
+			}
+		default:
+			// Only update input for other keys (not enter/ctrl+enter)
+			if m.showInput && !m.suggestionMode && !m.retryMode {
+				m.input, cmd = m.input.Update(msg)
+				cmds = append(cmds, cmd)
+			}
+		}
+	default:
+		// Update input for non-key messages
+		if m.showInput && !m.suggestionMode && !m.retryMode {
+			m.input, cmd = m.input.Update(msg)
+			cmds = append(cmds, cmd)
 		}
 	}
 
-	// Handle viewport updates
-	newViewport, vpCmd := m.viewport.Update(msg)
-	m.viewport = newViewport
-	cmds = append(cmds, vpCmd)
+	// Always update viewport
+	m.viewport, cmd = m.viewport.Update(msg)
+	cmds = append(cmds, cmd)
 
-	// Handle input updates if input is shown
-	if m.showInput {
-		newInput, inputCmd := m.input.Update(msg)
-		m.input = newInput
-		cmds = append(cmds, inputCmd)
-	}
+	m.updateViewportContent()
 
 	return m, tea.Batch(cmds...)
 }
 
-// handleUserInput processes user input and returns agent responses
-func (m ChatModel) handleUserInput() (tea.Model, tea.Cmd) {
-	userInput := m.input.Value()
-	if strings.TrimSpace(userInput) == "" {
-		return m, nil
+// View renders the chat interface
+func (m ChatModel) View() string {
+	var sections []string
+
+	connectionStatus := "⚫ Disconnected"
+	if m.connected {
+		connectionStatus = "🟢 Connected to cloud-assist"
 	}
 
-	// Add user message to chat
-	m.messages = append(m.messages, message{
-		content: userInput,
-		msgType: userMessage,
-	})
+	chatView := m.viewport.View()
 
-	// Reset input
-	m.input = NewMultiline("", "What would you like to do?", m.width-4, 5)
-
-	// Process the message with the agent service
-	agentResponses := m.agentService.ProcessUserMessage(userInput)
-
-	// Add agent responses to chat
-	for _, resp := range agentResponses {
-		var msgType messageType
-		switch resp.Type {
-		case mock.TypeAgent:
-			msgType = agentMessage
-		case mock.TypeCommand:
-			msgType = commandSuggestion
-			m.currentCommand = resp.Content
-			m.suggestionMode = true
-			m.showInput = false
-		case mock.TypeCommandOutput:
-			msgType = commandOutput
-		case mock.TypeError:
-			msgType = errorMessage
-		}
-
-		m.messages = append(m.messages, message{
-			content: resp.Content,
-			msgType: msgType,
-		})
+	var inputView string
+	if m.suggestionMode {
+		inputView = m.renderCommandSuggestion()
+	} else if m.retryMode {
+		inputView = m.renderRetryPrompt()
+	} else if m.showInput {
+		inputView = m.renderInput()
 	}
 
-	m.updateViewport()
-	return m, nil
+	sections = append(sections, connectionStatus)
+	sections = append(sections, chatView)
+	sections = append(sections, inputView)
+
+	return lipgloss.JoinVertical(lipgloss.Left, sections...)
 }
 
-// handleCommandApproval processes command approval responses
-func (m ChatModel) handleCommandApproval(response string) (tea.Model, tea.Cmd) {
-	// Add user response to chat
-	var responseText string
-	switch response {
-	case "y":
-		responseText = "y"
-	case "n":
-		responseText = "n"
-	case "e":
-		responseText = "e"
-	}
-
+// addMessage adds a message to the chat
+func (m *ChatModel) addMessage(content string, msgType messageType) {
 	m.messages = append(m.messages, message{
-		content: responseText,
-		msgType: userMessage,
+		content: content,
+		msgType: msgType,
 	})
-
-	// Process the response with the agent service
-	var agentResponses []mock.AgentMessage
-	if response == "y" {
-		agentResponses = m.agentService.ExecuteSuggestedCommand()
-	} else if response == "e" {
-		agentResponses = m.agentService.ProcessUserMessage("e")
-		// Keep suggestion mode active after explanation
-		m.suggestionMode = true
-		m.showInput = false
-	} else {
-		// For "n" response, just skip this command
-		m.suggestionMode = false
-		m.showInput = true
-		m.messages = append(m.messages, message{
-			content: "Command skipped. What would you like to do instead?",
-			msgType: agentMessage,
-		})
-		m.updateViewport()
-		return m, nil
-	}
-
-	// Add agent responses to chat
-	for _, resp := range agentResponses {
-		var msgType messageType
-		switch resp.Type {
-		case mock.TypeAgent:
-			msgType = agentMessage
-		case mock.TypeCommand:
-			msgType = commandSuggestion
-			m.currentCommand = resp.Content
-			m.suggestionMode = true
-			m.showInput = false
-		case mock.TypeCommandOutput:
-			msgType = commandOutput
-		case mock.TypeError:
-			msgType = errorMessage
-		}
-
-		m.messages = append(m.messages, message{
-			content: resp.Content,
-			msgType: msgType,
-		})
-	}
-
-	m.updateViewport()
-	return m, nil
+	m.updateViewportContent()
 }
 
-// updateViewport updates the viewport content
-func (m *ChatModel) updateViewport() {
-	var viewportContent strings.Builder
+// addCommandSuggestion adds a command suggestion to the chat
+func (m *ChatModel) addCommandSuggestion(command []string, explanation string) {
+	m.messages = append(m.messages, message{
+		content:     explanation,
+		msgType:     commandSuggestion,
+		command:     command,
+		explanation: explanation,
+	})
+	m.showInput = false
+	m.updateViewportContent()
+}
 
-	for i, msg := range m.messages {
-		// Add a newline between messages
-		if i > 0 {
-			viewportContent.WriteString("\n\n")
-		}
+// addRetryRequest adds a retry request to the chat
+func (m *ChatModel) addRetryRequest(content string, retryCount int) {
+	m.messages = append(m.messages, message{
+		content:    content,
+		msgType:    retryRequest,
+		retryCount: retryCount,
+	})
+	m.showInput = false
+	m.updateViewportContent()
+}
 
+// updateViewportContent updates the viewport with current messages
+func (m *ChatModel) updateViewportContent() {
+	var content strings.Builder
+
+	for _, msg := range m.messages {
 		switch msg.msgType {
 		case userMessage:
-			viewportContent.WriteString(lipgloss.NewStyle().
-				Foreground(lipgloss.Color("5")).
-				Render("You: "))
-			viewportContent.WriteString(msg.content)
-
+			content.WriteString(m.formatUserMessage(msg.content))
 		case agentMessage:
-			viewportContent.WriteString(lipgloss.NewStyle().
-				Foreground(lipgloss.Color("2")).
-				Bold(true).
-				Render("Cloud-Assist: "))
-			viewportContent.WriteString(msg.content)
-
+			content.WriteString(m.formatAgentMessage(msg.content))
 		case commandSuggestion:
-			// Center the command suggestion with box styling
-			viewportContent.WriteString(lipgloss.NewStyle().
-				Foreground(lipgloss.Color("3")).
-				Bold(true).
-				Align(lipgloss.Center).
-				Width(m.width - 10).
-				Render("Suggested command:"))
-
-			viewportContent.WriteString("\n")
-
-			// Command box with improved styling
-			viewportContent.WriteString(lipgloss.NewStyle().
-				Align(lipgloss.Center).
-				Width(m.width - 10).
-				Render(
-					lipgloss.NewStyle().
-						Background(lipgloss.Color("8")).
-						Foreground(lipgloss.Color("15")).
-						Padding(1, 2).
-						Border(lipgloss.RoundedBorder()).
-						BorderForeground(lipgloss.Color("12")).
-						Width(m.width / 2).
-						Align(lipgloss.Center).
-						Render(msg.content),
-				))
-
-			viewportContent.WriteString("\n\n")
-
-			// Center the options with improved styling
-			viewportContent.WriteString(lipgloss.NewStyle().
-				Foreground(lipgloss.Color("6")).
-				Align(lipgloss.Center).
-				Width(m.width - 10).
-				Render("[y] Execute  [n] Skip  [e] Explain  [q] Quit"))
-
+			content.WriteString(m.formatCommandSuggestion(msg.command, msg.explanation))
 		case commandOutput:
-			// Add header for output with box styling
-			viewportContent.WriteString(lipgloss.NewStyle().
-				Foreground(lipgloss.Color("8")).
-				Bold(true).
-				Render("Output:"))
-
-			viewportContent.WriteString("\n")
-
-			// Output box with improved styling
-			viewportContent.WriteString(lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("8")).
-				Padding(0, 1).
-				Width(m.width - 10).
-				Render(
-					lipgloss.NewStyle().
-						Foreground(lipgloss.Color("7")).
-						Render(msg.content),
-				))
-
+			content.WriteString(m.formatCommandOutput(msg.content))
 		case errorMessage:
-			viewportContent.WriteString(lipgloss.NewStyle().
-				Foreground(lipgloss.Color("1")).
-				Bold(true).
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("1")).
-				Padding(0, 1).
-				Width(m.width - 10).
-				Render("Error: " + msg.content))
+			content.WriteString(m.formatErrorMessage(msg.content))
+		case retryRequest:
+			content.WriteString(m.formatRetryRequest(msg.content, msg.retryCount))
 		}
+		content.WriteString("\n\n")
 	}
 
-	m.viewport.SetContent(viewportContent.String())
+	m.viewport.SetContent(content.String())
 	m.viewport.GotoBottom()
 }
 
-// View renders the chat model
-func (m ChatModel) View() string {
-	var view strings.Builder
+// Message formatting methods
+func (m *ChatModel) formatUserMessage(content string) string {
+	style := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#00ff00")).
+		Bold(true)
+	return style.Render("You: ") + content
+}
 
-	// Create a centered container for the entire view
-	mainStyle := lipgloss.NewStyle().
-		Width(m.width).
-		Align(lipgloss.Center)
+func (m *ChatModel) formatAgentMessage(content string) string {
+	style := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#0099ff")).
+		Bold(true)
+	return style.Render("Agent: ") + content
+}
 
-	// Chat history with improved styling
-	view.WriteString(mainStyle.Render(m.viewport.View()) + "\n\n")
-
-	// Input header with consistent styling
-	inputHeader := "What would you like to help with?"
-	if m.suggestionMode {
-		inputHeader = "Command suggestion active. Press y to execute, n to skip, e to explain, or q to quit."
-	}
-
+func (m *ChatModel) formatCommandSuggestion(command []string, explanation string) string {
 	headerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("12")).
-		Bold(true).
-		Width(m.width - 10).
-		Align(lipgloss.Center)
+		Foreground(lipgloss.Color("#ffaa00")).
+		Bold(true)
+	commandStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#ffffff")).
+		Background(lipgloss.Color("#333333")).
+		Padding(0, 1)
 
-	view.WriteString(mainStyle.Render(headerStyle.Render(inputHeader)))
-	view.WriteString("\n")
+	header := headerStyle.Render("Command Suggestion:")
+	commandText := commandStyle.Render(strings.Join(command, " "))
 
-	// Render input with improved styling
-	if m.showInput {
-		// Create a consistent input box style
-		inputBoxStyle := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("12")).
-			Padding(1, 2).
-			Width(m.width - 20)
+	return fmt.Sprintf("%s\n%s\n%s", header, explanation, commandText)
+}
 
-		// Wrap the input in the styled box
-		inputContent := inputBoxStyle.Render(m.input.View())
-		view.WriteString(mainStyle.Render(inputContent))
-	}
+func (m *ChatModel) formatCommandOutput(content string) string {
+	style := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#888888")).
+		Italic(true)
+	return style.Render("Output: ") + content
+}
 
-	return view.String()
+func (m *ChatModel) formatErrorMessage(content string) string {
+	style := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#ff0000")).
+		Bold(true)
+	return style.Render("Error: ") + content
+}
+
+func (m *ChatModel) formatRetryRequest(content string, retryCount int) string {
+	headerStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#ff6600")).
+		Bold(true)
+
+	header := headerStyle.Render(fmt.Sprintf("Retry Request (Attempt %d):", retryCount))
+	return fmt.Sprintf("%s\n%s", header, content)
+}
+
+// renderInput renders the input area
+func (m *ChatModel) renderInput() string {
+	inputView := m.input.View()
+
+	// Add instructions below the input
+	instructions := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#888888")).
+		Italic(true).
+		Render("Press Enter to send • Ctrl+C to exit")
+
+	return lipgloss.JoinVertical(lipgloss.Left, inputView, instructions)
+}
+
+// renderCommandSuggestion renders the command approval prompt
+func (m *ChatModel) renderCommandSuggestion() string {
+	style := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(1).
+		Foreground(lipgloss.Color("#ffaa00"))
+
+	commandStr := strings.Join(m.currentCommand, " ")
+	prompt := fmt.Sprintf("Execute command: %s\n\n%s\n\nApprove? (y/n)",
+		commandStr, m.currentExplanation)
+
+	return style.Render(prompt)
+}
+
+// renderRetryPrompt renders the retry request prompt
+func (m *ChatModel) renderRetryPrompt() string {
+	style := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(1).
+		Foreground(lipgloss.Color("#ff6600"))
+
+	prompt := fmt.Sprintf("%s\n\nRetry with a different approach? (y/n)",
+		m.currentRetryContent)
+
+	return style.Render(prompt)
 }

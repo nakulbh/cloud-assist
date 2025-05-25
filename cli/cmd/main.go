@@ -63,8 +63,18 @@ func NewAppModel() AppModel {
 	// Create status bar
 	statusBar := ui.NewStatusBar(100)
 
+	// Check if user is already authenticated
+	initialScreen := screenLogin
+	authenticated := false
+	if _, err := auth.GetAPIKey(); err == nil {
+		// API key exists, skip login and go directly to chat
+		initialScreen = screenChat
+		authenticated = true
+	}
+
 	return AppModel{
-		currentScreen: screenLogin,
+		currentScreen: initialScreen,
+		authenticated: authenticated,
 		loginModel:    loginModel,
 		chatModel:     chatModel,
 		textInput:     textInput,
